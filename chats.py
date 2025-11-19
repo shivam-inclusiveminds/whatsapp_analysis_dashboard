@@ -2,7 +2,12 @@ import requests
 import pandas as pd
 import time
 import concurrent.futures
+import streamlit as st
+import json
+import os
 
+
+@st.cache_data(ttl=7200)
 def fetch_all_chat_data(api_key, org_phones, endpoint="chats", limit=1000, sleep_time=0.5, max_workers=5):
     """
     Fetch all paginated data from Periskope API for multiple org phones in parallel.
@@ -38,7 +43,6 @@ def fetch_all_chat_data(api_key, org_phones, endpoint="chats", limit=1000, sleep
                 break
 
             data = response.json()
-            # Try different keys depending on endpoint
             results = data.get("chats") or data.get("results") or data.get("notifications") or []
 
             if not results:
@@ -49,7 +53,7 @@ def fetch_all_chat_data(api_key, org_phones, endpoint="chats", limit=1000, sleep
             print(f"[{org_phone}] Fetched {len(results)} (total: {len(all_results)})")
 
             offset += limit
-            time.sleep(sleep_time)  # avoid hammering API
+            time.sleep(sleep_time)
 
         # Tag with org_phone for identification
         for r in all_results:
@@ -64,4 +68,18 @@ def fetch_all_chat_data(api_key, org_phones, endpoint="chats", limit=1000, sleep
         for res in results:
             combined_results.extend(res)
 
-    return pd.DataFrame(combined_results)
+    df = pd.DataFrame(combined_results)
+
+    if not df.empty:
+        # 🔧 Convert nested dict/list fields into JSON strings (Parquet safe)
+        for col in df.columns:
+            if df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
+
+        # ensure cache folder exists
+        os.makedirs("cache", exist_ok=True)
+
+        # save parquet safely
+        df.to_parquet("cache/chats.parquet", index=False)
+
+    return df
