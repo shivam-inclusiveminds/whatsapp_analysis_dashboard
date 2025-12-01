@@ -169,7 +169,7 @@ if ' chat_name' in chats_df.columns:
 df_mapp = pd.read_csv(
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vSz3h-NZludfp1amcsvUogHytljEpvKTXRI138UVu0y1EpJAx67gpWBHhHU_M1ACdoI8dNc-11cm0mk/pub?gid=0&single=true&output=csv'
 )
-
+df_mapp = df_mapp[df_mapp['Group type']!= "NA"]
 # Merge metadata
 merged_df = pd.merge(chats_df, df_mapp, on=['chat_id', 'chat_name'], how='left')
 merged_df.rename(columns={'chat_name': 'chats_name'}, inplace=True)
@@ -447,35 +447,58 @@ with tab4:
     st.header("🔥 Top Messages by Reactions")
     if not filtered_reactions.empty and 'message_id' in filtered_reactions.columns:
 
+    # ---- Count top reacted messages ----
         top_reacted = (
             filtered_reactions.groupby('message_id')['reaction']
             .count()
             .reset_index(name='Reaction Count')
             .sort_values('Reaction Count', ascending=False)
-            .head(15)
+            .head(10)
         )
 
-        top_reacted = top_reacted.merge(
-            filtered_msgs[['message_id', 'body', 'chats_name']],
-            on='message_id', how='left'
+    # ---- Remove duplicates before merge ----
+        clean_msgs = (
+            filtered_msgs[['message_id', 'body', 'chats_name']]
+            .drop_duplicates(subset=['message_id'])
         )
 
-        # ---- Remove None / empty / NaN messages ----
+        top_reacted = top_reacted.merge(clean_msgs, on='message_id', how='left')
+
+        # ---- Remove empty messages ----
         top_reacted = top_reacted[
-            top_reacted['body'].notna() & (top_reacted['body'] != "") & (top_reacted['body'] != "None")
+            top_reacted['body'].notna() &
+            (top_reacted['body'] != "") &
+            (top_reacted['body'] != "None")
         ]
+    # ---- Truncate long messages ----
+        def truncate(text, max_len=120):
+            if isinstance(text, str) and len(text) > max_len:
+                return text[:max_len] + "..."
+            return text
 
-        # Show table
+        top_reacted['Message'] = top_reacted['body'].apply(lambda x: truncate(x, 120))
+
+    # ---- Apply CSS to limit table cell size ----
+        st.markdown("""
+        <style>
+        .full-width-table table td {
+            max-width: 350px;
+            white-space: normal !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # ---- Show table ----
         styled_table = apply_default_table_style(
-            top_reacted[['chats_name', 'body', 'Reaction Count']].rename(
-            columns={'chats_name': 'Group', 'body': 'Message'}
+            top_reacted[['chats_name', 'Message', 'Reaction Count']].rename(
+                columns={'chats_name': 'Group'}
             )
         )
 
         st.markdown(
-        f"<div class='full-width-table'>{styled_table}</div>",
+            f"<div class='full-width-table'>{styled_table}</div>",
             unsafe_allow_html=True
-        )   
+        )
 
     else:
         st.info("No reacted messages.")
