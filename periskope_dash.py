@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
+import pytz
 
 # =========================== CUSTOM CSS ===============================
 st.markdown("""
@@ -158,6 +159,7 @@ msg_df = fetch_all_message_data(api_key)
 ORG_PHONES = pd.Series(msg_df.org_phone.str.replace('@c.us', '').unique()).to_list()
 
 chats_df = fetch_all_chat_data(api_key, ORG_PHONES, endpoint="chats", limit=1000)
+chats_df = chats_df[chats_df['chat_type']=='group']
 rec_df   = fetch_all_rection_data(api_key, ORG_PHONES, endpoint="reactions", limit=1000)
 noti_df  = fetch_all_notification_data(api_key, ORG_PHONES, limit=1000)
 
@@ -169,16 +171,20 @@ if ' chat_name' in chats_df.columns:
 df_mapp = pd.read_csv(
     'https://docs.google.com/spreadsheets/d/e/2PACX-1vSz3h-NZludfp1amcsvUogHytljEpvKTXRI138UVu0y1EpJAx67gpWBHhHU_M1ACdoI8dNc-11cm0mk/pub?gid=0&single=true&output=csv'
 )
-df_mapp = df_mapp[df_mapp['Group type']!= "NA"]
+df_mapp = df_mapp[df_mapp['Group type']!= 'Not_Imp']
+chatid = df_mapp['chat_id'].tolist()
 # Merge metadata
-merged_df = pd.merge(chats_df, df_mapp, on=['chat_id', 'chat_name'], how='left')
+#chat_df_unique = chats_df.drop_duplicates(subset=['chat_id','chat_name'])
+chat_df_new = chats_df[chats_df['chat_id'].isin(chatid)].drop_duplicates(subset=['chat_id','chat_name'])
+merged_df = pd.merge(chat_df_new, df_mapp, on=['chat_id', 'chat_name'], how='left')
 merged_df.rename(columns={'chat_name': 'chats_name'}, inplace=True)
 
 # Keep only WhatsApp Group chats
-merged_df = merged_df[merged_df['chat_type'] == 'group']
-
+merged_df = merged_df[merged_df['chat_type'] == 'group'].dropna(subset=['Group type'])
 # Drop unwanted groups
 merged_df = merged_df[merged_df['chats_name'] != "Cotton' 97 Arts Batch"]
+merged_df = merged_df[merged_df['chats_name'] != "DRUG-FREE MIZORAM"]
+
 
 
 chat_df = merged_df.copy()
@@ -252,17 +258,53 @@ filtered_notifications = noti_df[(noti_df['date_new'] >= start_date) &
                                  (noti_df['date_new'] <= end_date)]
 
 # ======================== METRICS CALCULATIONS =======================
-total_groups = filtered_chats['chat_id'].nunique()
-total_members = int(filtered_chats['member_count'].nunique())
-unique_individuals = filtered_msgs['sender_phone'].nunique()
 
-# Active calculation
+merged_msg_df = pd.merge(chat_df, msg_df, on=['chat_id'], how='left')
+# Convert timestamp to datetime (already timezone-aware)
+merged_msg_df['timestamp'] = pd.to_datetime(merged_msg_df['timestamp'], errors='coerce')
+
+# Define 7 days ago with UTC timezone
+seven_days_ago = datetime.now(pytz.UTC) - timedelta(days=7)
+
+# Add 'last_7days' column
+merged_msg_df['last_7days'] = merged_msg_df['timestamp'].apply(lambda x: 'yes' if x >= seven_days_ago else 'no')
+
+weekly_fd = merged_msg_df[merged_msg_df["last_7days"] == 'yes'].copy()
+
+# ----------------------------------------------------
+# 2️⃣ ACTIVE MEMBERS (sender_phone sent ≥ 7 messages)
+# ----------------------------------------------------
+member_msg_counts = (
+    weekly_fd.groupby("sender_phone")["message_id"]
+    .nunique()
+    .reset_index(name="msg_count")
+)
+
+total_members = member_msg_counts[member_msg_counts["msg_count"] >= 7]["sender_phone"].nunique()
+
+# Total groups
+total_groups = filtered_chats['chat_id'].nunique()
+# Total members (sum of member_count)
+active_members = member_msg_counts[member_msg_counts["msg_count"] >= 1]["sender_phone"].nunique()
+# Unique individuals (unique sender_phone)
+unique_individuals = active_members
+
+# ----------------------------------------------------
+# 1️⃣ ACTIVE GROUPS (≥ 10 messages in last 7 days)
+# ----------------------------------------------------
+chat_msg_counts = (
+    weekly_fd.groupby("chat_id")["message_id"]
+    .nunique()
+    .reset_index(name="msg_count")
+)
+
+active_chats = chat_msg_counts[chat_msg_counts["msg_count"] >= 10]["chat_id"].tolist()
+active_groups = len(active_chats)
+
+
 today = datetime.now().date()
 week_start = today - timedelta(days=7)
 weekly_msgs = filtered_msgs[filtered_msgs['date_new'] >= week_start]
-
-active_members = weekly_msgs['sender_phone'].nunique()
-active_groups = weekly_msgs['chat_id'].nunique()
 
 # ========================= 5 SLIDES (TABS) ===========================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -284,6 +326,18 @@ custom_scale = [
     "#00b200",  # less dark green
     "#007f00"   # dark green (lowest)
 ]
+#------------------------------------------------
+#for district
+
+# Keep only District type
+district_df = merged_df[merged_df['Group type'] == 'District']
+
+# Remove duplicates per chat per district
+district_df_unique = district_df.drop_duplicates(subset=['chat_id', 'District Name'])
+
+# Count unique chat IDs per district
+dist_grp = district_df_unique.groupby("District Name")["chat_id"].nunique().reset_index(name="Group Count")
+
 
 # =====================================================================
 #                            SLIDE 1
@@ -296,13 +350,13 @@ with tab1:
     c3.metric("Active Members", total_members)
 
     # Groups by District
-    if "District Name" in filtered_chats.columns:
-        dist_grp = filtered_chats.groupby("District Name")["chat_id"].nunique().reset_index(name="Group Count")
-        fig = px.bar(dist_grp, x="District Name", y="Group Count",
-                     color="Group Count", text="Group Count",title="Groups by District",
-                     color_continuous_scale=custom_scale)
-        fig = apply_default_plotly_style(fig)
-        st.plotly_chart(fig, use_container_width=True)
+    fig = px.bar(dist_grp, x="District Name", y="Group Count",
+             color="Group Count", text="Group Count",
+             title="Groups by District",
+             color_continuous_scale=custom_scale)
+    fig = apply_default_plotly_style(fig)
+    st.plotly_chart(fig, use_container_width=True)
+
 
     # Groups by State
     if "State Name" in filtered_chats.columns:
@@ -335,37 +389,84 @@ with tab1:
 #                            SLIDE 2
 # =====================================================================
 with tab2:
-    st.header("📊 Active Groups & Members by District")
+    st.header("📊 Top 5 Active Groups & Members by District")
 
-    if not weekly_msgs.empty:
+    # -------------------------------------------------------
+    # CLEAN + UNIFY DISTRICT COLUMNS
+    # -------------------------------------------------------
+    district_cols = [c for c in weekly_fd.columns if "district" in c.lower()]
+    if len(district_cols) > 1:
+        weekly_fd["District Name"] = weekly_fd[district_cols].bfill(axis=1).iloc[:, 0]
+    elif len(district_cols) == 1:
+        weekly_fd.rename(columns={district_cols[0]: "District Name"}, inplace=True)
+    else:
+        st.error("❌ District Name column missing in weekly data.")
+        st.stop()
+
+    weekly_fd["District Name"] = weekly_fd["District Name"].astype(str).str.strip().str.title()
+
+    # -------------------------------------------------------
+    # 1️⃣ Active Members
+    # -------------------------------------------------------
+    if not weekly_fd.empty:
+        member_counts_dist = (
+            weekly_fd.groupby(["District Name", "sender_phone"])["message_id"]
+            .nunique()
+            .reset_index(name="msg_count")
+        )
         active_members_district = (
-            weekly_msgs.groupby("District Name")["sender_phone"]
+            member_counts_dist[member_counts_dist["msg_count"] >= 7]
+            .groupby("District Name")["sender_phone"]
             .nunique()
             .reset_index(name="Active Members")
         )
-        active_groups_district = (
-            weekly_msgs.groupby("District Name")["chat_id"]
-            .nunique()
-            .reset_index(name="Active Groups")
+
+        # -------------------------------------------------------
+        # 2️⃣ Merge with Slide 1 Group Counts
+        # -------------------------------------------------------
+        combined = pd.merge(
+            active_members_district,
+            dist_grp,  # Slide 1 cleaned group counts
+            on="District Name",
+            how="right"
+        ).fillna(0)
+
+        # -------------------------------------------------------
+        # 3️⃣ Keep only top 5 districts by Group Count
+        # -------------------------------------------------------
+        top5 = combined.sort_values("Group Count", ascending=False).head(5)
+
+        # -------------------------------------------------------
+        # 4️⃣ Display table
+        # -------------------------------------------------------
+        apply_default_table_style(top5)
+
+        # -------------------------------------------------------
+        # 5️⃣ Prepare data for grouped bar chart
+        # -------------------------------------------------------
+        melted = top5.melt(
+            id_vars="District Name",
+            value_vars=["Active Members", "Group Count"],
+            var_name="Type",
+            value_name="Count"
         )
-        combined = pd.merge(active_members_district, active_groups_district, on="District Name")
-        apply_default_table_style(combined)
 
-        melted = combined.melt(id_vars="District Name", value_vars=["Active Members", "Active Groups"],
-                               var_name="Type", value_name="Count")
-
+        # -------------------------------------------------------
+        # 6️⃣ Plot with custom color scale
+        # -------------------------------------------------------
         fig4 = px.bar(
             melted,
             x="District Name",
             y="Count",
-            color="Count",
-            color_continuous_scale=custom_scale,
+            color="Count",  # numeric for color scale
             text="Count",
             barmode="group",
-            title="Active Members vs Active Groups by District"
+            title="Top 5 Districts: Active Members vs Groups",
+            color_continuous_scale=custom_scale
         )
         fig4 = apply_default_plotly_style(fig4)
         st.plotly_chart(fig4, use_container_width=True)
+
     else:
         st.info("No activity in last 7 days.")
 
@@ -375,22 +476,22 @@ with tab2:
 with tab3:
     st.header("📈 Member Join/Leave Dynamics")
 
+    # ------------------------
+    # Past week net joins
+    # ------------------------
     one_week_ago = end_date - timedelta(days=7)
     weekly_moves = filtered_notifications[
         (filtered_notifications['date_new'] >= one_week_ago) &
         (filtered_notifications['type'].isin(['add', 'leave']))
     ]
 
-    # Net joins
     add_count = weekly_moves[weekly_moves['type'] == 'add']['chat_id'].count()
     leave_count = weekly_moves[weekly_moves['type'] == 'leave']['chat_id'].count()
-    net_joins = int(add_count - leave_count)  # convert to Python int
+    net_joins = int(add_count - leave_count)  # convert to int
 
-    # Set color and sign
     color = "green" if net_joins >= 0 else "red"
     sign = "+" if net_joins >= 0 else ""
 
-    # Display with HTML (one number only, colored)
     st.markdown(
         f"""
         <div style="text-align: center;">
@@ -403,16 +504,35 @@ with tab3:
         unsafe_allow_html=True
     )
 
-
+    # ------------------------
     # 6-week trend
+    # ------------------------
     six_week_ago = end_date - timedelta(days=42)
     movement_long = filtered_notifications[
         (filtered_notifications['date_new'] >= six_week_ago) &
         (filtered_notifications['type'].isin(['add', 'leave']))
     ]
+
     trend = movement_long.groupby(["date_new", "type"]).size().reset_index(name="Count")
-    fig5 = px.line(trend, x="date_new", y="Count", color="type",
-                  markers=True, title="6-Week Join/Leave Trend")
+
+    # ------------------------
+    # Custom color mapping: add=green, leave=red
+    # ------------------------
+    color_map = {
+        "add": "green",
+        "leave": "red"
+    }
+
+    fig5 = px.line(
+        trend,
+        x="date_new",
+        y="Count",
+        color="type",
+        markers=True,
+        title="6-Week Join/Leave Trend",
+        color_discrete_map=color_map
+    )
+
     fig5 = apply_default_plotly_style(fig5)
     st.plotly_chart(fig5, use_container_width=True)
 
@@ -423,62 +543,76 @@ with tab3:
 with tab4:
     col1, col2 = st.columns(2)
 
+    # -------------------------------
+    # Top Disseminators
+    # -------------------------------
     with col1:
         st.subheader("Top Disseminators")
-        top_posters = filtered_msgs.groupby("sender_phone")["message_id"].count().reset_index(name="Message Count")
+        top_posters = (
+            filtered_msgs.groupby("sender_phone")["message_id"]
+            .count()
+            .reset_index(name="Message Count")
+        )
+        # Keep last 10 digits only
+        top_posters["sender_phone"] = top_posters["sender_phone"].astype(str).str[-10:]
         top_posters = top_posters.sort_values("Message Count", ascending=False).head(10)
         apply_default_table_style(top_posters)
 
+    # -------------------------------
+    # Reactions by Type
+    # -------------------------------
     with col2:
         st.subheader("😃 Reactions by Type")
         if not filtered_reactions.empty and "reaction" in filtered_reactions.columns:
-            reaction_counts = filtered_reactions['reaction'].fillna("None").value_counts().reset_index()
+            reaction_counts = (
+                filtered_reactions['reaction'].fillna("None")
+                .value_counts()
+                .reset_index()
+            )
             reaction_counts.columns = ['Reaction','Count']
             reaction_counts = reaction_counts.head(5)  # top 5
-            fig6 = px.bar(reaction_counts, x='Reaction', y='Count', text='Count',
-                         color='Count', color_continuous_scale=custom_scale,
-                         title="Top Reactions to Messages")
+            fig6 = px.bar(
+                reaction_counts,
+                x='Reaction', y='Count', text='Count',
+                color='Count', color_continuous_scale=custom_scale,
+                title="Top Reactions to Messages"
+            )
             fig6 = apply_default_plotly_style(fig6)
             st.plotly_chart(fig6, use_container_width=True)
         else:
             st.info("No reactions available.")
 
-
+    # -------------------------------
+    # Top Messages by Reactions
+    # -------------------------------
     st.header("🔥 Top Messages by Reactions")
     if not filtered_reactions.empty and 'message_id' in filtered_reactions.columns:
 
-    # ---- Count top reacted messages ----
-        top_reacted = (
-            filtered_reactions.groupby('message_id')['reaction']
-            .count()
-            .reset_index(name='Reaction Count')
-            .sort_values('Reaction Count', ascending=False)
-            .head(10)
-        )
-
-    # ---- Remove duplicates before merge ----
+        # ---- Deduplicate messages by text + group ----
         clean_msgs = (
             filtered_msgs[['message_id', 'body', 'chats_name']]
-            .drop_duplicates(subset=['message_id'])
+            .drop_duplicates(subset=['body','chats_name'])
         )
 
-        top_reacted = top_reacted.merge(clean_msgs, on='message_id', how='left')
+        # ---- Count reactions per unique message ----
+        top_reacted = (
+            filtered_reactions.merge(clean_msgs, on='message_id', how='left')
+            .groupby(['chats_name','body'])
+            .agg({'reaction':'count'})
+            .reset_index()
+            .rename(columns={'reaction':'Reaction Count'})
+            .sort_values('Reaction Count', ascending=False)
+            .head(5)
+        )
 
-        # ---- Remove empty messages ----
-        top_reacted = top_reacted[
-            top_reacted['body'].notna() &
-            (top_reacted['body'] != "") &
-            (top_reacted['body'] != "None")
-        ]
-    # ---- Truncate long messages ----
+        # ---- Truncate long messages ----
         def truncate(text, max_len=120):
             if isinstance(text, str) and len(text) > max_len:
                 return text[:max_len] + "..."
             return text
-
         top_reacted['Message'] = top_reacted['body'].apply(lambda x: truncate(x, 120))
 
-    # ---- Apply CSS to limit table cell size ----
+        # ---- Apply CSS to limit table cell size ----
         st.markdown("""
         <style>
         .full-width-table table td {
@@ -494,15 +628,12 @@ with tab4:
                 columns={'chats_name': 'Group'}
             )
         )
-
         st.markdown(
             f"<div class='full-width-table'>{styled_table}</div>",
             unsafe_allow_html=True
         )
-
     else:
         st.info("No reacted messages.")
-
 
 # =====================================================================
 #                            SLIDE 5
@@ -510,47 +641,59 @@ with tab4:
 with tab5:
     st.header("🏆 Top 5 Performing Districts")
 
-    # Groups per district
-    district_groups = (
-        filtered_chats.groupby("District Name")["chat_id"]
-        .nunique().reset_index(name="Group Count")
-    )
+    # ---------------------------
+    # Use the cleaned dist_grp from Slide 1
+    # ---------------------------
+    district_groups = dist_grp.copy()  # already cleaned, deduplicated
 
-    # Messages per district
+    # ---------------------------
+    # Message counts per district
+    # ---------------------------
     district_msgs = (
-        filtered_msgs.groupby("District Name")["message_id"]
-        .count().reset_index(name="Message Count")
+        filtered_msgs.copy()
+        .assign(District_Name=lambda df: df["District Name"].astype(str).str.strip().str.title())
+        .groupby("District Name")["message_id"]
+        .count()
+        .reset_index(name="Message Count")
     )
 
-    perf = pd.merge(district_groups, district_msgs, on="District Name")
+    # ---------------------------
+    # Merge groups & messages
+    # ---------------------------
+    perf = pd.merge(district_groups, district_msgs, on="District Name", how="left").fillna(0)
 
-    # Ranking (lower is better)
+    # ---------------------------
+    # Ranking
+    # ---------------------------
     perf["Group Rank"] = perf["Group Count"].rank(ascending=False)
-    perf["Msg Rank"] = perf["Message Count"].rank(ascending=False)
+    perf["Msg Rank"]   = perf["Message Count"].rank(ascending=False)
 
-    # Composite score (keep it in backend)
-    perf["Composite Score"] = 0.25 * perf["Group Rank"] + 0.75 * perf["Msg Rank"]
-    perf["Comp Score"] = round((1/perf["Composite Score"])*10,2)  # Higher is better
+    perf["Composite Score"] = (0.25 * perf["Group Rank"]) + (0.75 * perf["Msg Rank"])
+    perf["Comp Score"] = round((1 / perf["Composite Score"]) * 10, 2)
 
-
-
+    # ---------------------------
     # Top 5 districts
+    # ---------------------------
     top5 = perf.sort_values("Composite Score").head(5)
 
-    # ---- Hide Composite Score column from the displayed table ----
-    show_cols = [c for c in top5.columns if c not in ["Composite Score","Comp Score"]]
+    # ---------------------------
+    # Table (styled)
+    # ---------------------------
+    show_cols = [c for c in top5.columns if c not in ["Composite Score", "Comp Score"]]
     apply_default_table_style(top5[show_cols])
 
-    # ---- Use Composite Score internally for the bar chart ----
+    # ---------------------------
+    # Chart
+    # ---------------------------
     fig7 = px.bar(
-    top5,
-    x="District Name",
-    y="Comp Score",
-    title="Top 5 Districts by Composite Score",
-    color="Comp Score",
-    color_continuous_scale=custom_scale
-)
-
+        top5,
+        x="District Name",
+        y="Comp Score",
+        title="Top 5 Districts by Composite Score",
+        color="Comp Score",
+        color_continuous_scale=custom_scale,
+        text="Comp Score"
+    )
     fig7 = apply_default_plotly_style(fig7)
     st.plotly_chart(fig7, use_container_width=True)
 
