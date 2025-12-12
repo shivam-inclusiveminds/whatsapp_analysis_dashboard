@@ -174,10 +174,9 @@ df_mapp = pd.read_csv(
 df_mapp = df_mapp[df_mapp['Group type']!= 'Not_Imp']
 chatid = df_mapp['chat_id'].tolist()
 # Merge metadata
-#chat_df_unique = chats_df.drop_duplicates(subset=['chat_id','chat_name'])
-chat_df_new = chats_df[chats_df['chat_id'].isin(chatid)].drop_duplicates(subset=['chat_id','chat_name'])
-merged_df = pd.merge(chat_df_new, df_mapp, on=['chat_id', 'chat_name'], how='left')
-merged_df.rename(columns={'chat_name': 'chats_name'}, inplace=True)
+chat_df_new = chats_df[chats_df['chat_id'].isin(chatid)].drop_duplicates(subset=['chat_id'])
+merged_df = pd.merge(chat_df_new, df_mapp, on=['chat_id'], how='left')
+merged_df.rename(columns={'chat_name_y': 'chats_name'}, inplace=True)
 
 # Keep only WhatsApp Group chats
 merged_df = merged_df[merged_df['chat_type'] == 'group'].dropna(subset=['Group type'])
@@ -390,10 +389,6 @@ with tab1:
 # =====================================================================
 with tab2:
     st.header("📊 Top 5 Active Groups & Members by District")
-
-    # -------------------------------------------------------
-    # CLEAN + UNIFY DISTRICT COLUMNS
-    # -------------------------------------------------------
     district_cols = [c for c in weekly_fd.columns if "district" in c.lower()]
     if len(district_cols) > 1:
         weekly_fd["District Name"] = weekly_fd[district_cols].bfill(axis=1).iloc[:, 0]
